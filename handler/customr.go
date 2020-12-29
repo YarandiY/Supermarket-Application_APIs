@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"math/rand"
 	"net/http"
 	"strconv"
 	"strings"
@@ -9,17 +8,11 @@ import (
 
 	"github.com/labstack/echo/v4"
 	"github.com/yarandiy/IE-assignment/model"
-	// "go.mongodb.org/mongo-driver/mongo"
+	"github.com/yarandiy/IE-assignment/repository"
 )
 
 type Customer struct {
 }
-
-type Customers []model.Customer
-
-var customers Customers
-
-// var client *mongo.Client
 
 type Request struct {
 	Name    string `json:"cName"`
@@ -50,15 +43,20 @@ func (customer Customer) Create(c echo.Context) error {
 		})
 	}
 
+	t := time.Now()
+	id, err := repository.InsertCustomer(req.Name, req.Tel, req.Address, t)
+
+	if err != nil {
+		return echo.NewHTTPError(http.StatusBadRequest, err)
+	}
+
 	m := model.Customer{
 		Name:         req.Name,
 		Tel:          req.Tel,
 		Address:      req.Address,
-		RegisterDate: time.Now(),
-		Id:           rand.New(rand.NewSource(time.Now().UnixNano())).Intn(10000),
+		RegisterDate: t,
+		Id:           id,
 	}
-
-	customers = append(customers, m)
 
 	return c.JSON(http.StatusCreated, CreateResponse{
 		Name:         m.Name,
@@ -71,9 +69,9 @@ func (customer Customer) Create(c echo.Context) error {
 }
 
 type ReadResponse struct {
-	Size      int       `json:"size"`
-	Customers Customers `json:"customers,omitempty"`
-	Message   string    `json:"msg,omitempty"`
+	Size      int              `json:"size"`
+	Customers []model.Customer `json:"customers,omitempty"`
+	Message   string           `json:"msg,omitempty"`
 }
 
 func (customer Customer) Read(c echo.Context) error {
@@ -85,20 +83,38 @@ func (customer Customer) Read(c echo.Context) error {
 				Message: "error : query param validation error",
 			})
 		}
-
+		customers, err := repository.AllCustomers()
+		if err != nil {
+			return c.JSON(http.StatusBadRequest, err)
+		}
+		counter := 0
+		var result []model.Customer
 		for _, custo := range customers {
-			if strings.Contains(custo.Name, value) {
-				return c.JSON(http.StatusOK, custo)
+			if strings.HasPrefix(custo.Name, value) {
+				counter += 1
+				result = append(result, custo)
 			}
+		}
+		if counter != 0 {
+			return c.JSON(http.StatusOK, ReadResponse{
+				Size:      counter,
+				Customers: result,
+				Message:   "success",
+			})
 		}
 		return c.JSON(http.StatusBadRequest, SimpleResponse{
 			Message: "error : there is no customer with this cName",
 		})
 	}
+
+	customers, err := repository.AllCustomers()
 	c_size := len(customers)
 	msg := "success"
 	if customers == nil || c_size == 0 {
 		msg = "error : there is no customer"
+	}
+	if err != nil {
+		msg = "error : database error"
 	}
 	return c.JSON(http.StatusOK, ReadResponse{
 		Size:      c_size,
@@ -113,17 +129,16 @@ type SimpleResponse struct {
 
 func (customer Customer) Delete(c echo.Context) error {
 	id, _ := strconv.Atoi(c.Param("id"))
-	for i, _ := range customers {
-		if customers[i].Id == id {
-			customers = append(customers[:i], customers[i+1:]...)
-			return c.JSON(http.StatusOK, SimpleResponse{
-				Message: "success",
-			})
-		}
+	rows, err := repository.RemoveCustomer(id)
+	if err != nil || rows == 0 {
+		return echo.NewHTTPError(http.StatusBadRequest, SimpleResponse{
+			Message: "error : the input cID is not available ",
+		})
 	}
-	return echo.NewHTTPError(http.StatusBadRequest, SimpleResponse{
-		Message: "error : the input cID is not available ",
+	return c.JSON(http.StatusOK, SimpleResponse{
+		Message: "success",
 	})
+
 }
 
 func (customer Customer) Update(c echo.Context) error {
@@ -137,30 +152,43 @@ func (customer Customer) Update(c echo.Context) error {
 	}
 
 	id, _ := strconv.Atoi(c.Param("id"))
-	for i, _ := range customers {
-		if customers[i].Id == id {
-			if req.Name != "" {
-				customers[i].Name = req.Name
-			}
-			if req.Tel != 0 {
-				customers[i].Tel = req.Tel
-			}
-			if req.Address != "" {
-				customers[i].Address = req.Address
-			}
-			return c.JSON(http.StatusOK, CreateResponse{
-				Name:         customers[i].Name,
-				Tel:          customers[i].Tel,
-				Address:      customers[i].Address,
-				RegisterDate: customers[i].RegisterDate,
-				Id:           customers[i].Id,
-				Message:      "success",
-			})
-		}
+	custo, err := repository.GetCustomer(id)
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, SimpleResponse{
+			Message: "error : the input cID is not available ",
+		})
 	}
-	return c.JSON(http.StatusBadRequest, SimpleResponse{
-		Message: "error : the input cID is not available ",
+	name := req.Name
+	tel := req.Tel
+	address := req.Address
+
+	if name == "" {
+		name = custo.Name
+	}
+	if tel == 0 {
+		tel = custo.Tel
+	}
+	if req.Address == "" {
+		address = custo.Address
+	}
+
+	_, err = repository.UpdateCustomer(id, name, tel, address, custo.RegisterDate)
+
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, SimpleResponse{
+			Message: "error : the input cID is not available ",
+		})
+	}
+
+	return c.JSON(http.StatusOK, CreateResponse{
+		Name:         name,
+		Tel:          tel,
+		Address:      address,
+		RegisterDate: custo.RegisterDate,
+		Id:           id,
+		Message:      "success",
 	})
+
 }
 
 type ReportResponse struct {
@@ -172,6 +200,10 @@ type ReportResponse struct {
 func Report(c echo.Context) error {
 	month, _ := strconv.Atoi(c.Param("month"))
 	counter := 0
+	customers, err := repository.AllCustomers()
+	if err != nil {
+		return c.JSON(http.StatusBadRequest, err)
+	}
 	for _, custo := range customers {
 		m := int(custo.RegisterDate.Month()) - 1
 		if m == month {
